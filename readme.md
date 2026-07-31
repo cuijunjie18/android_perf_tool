@@ -5,11 +5,15 @@
 - 输入：一系列操作序列
 - 输出：输入操作序列得到的PerfDog性能文件（URL）
 
+<br>
+
 ## 二、前置条件
 
 - 下载perfDog Service： https://perfdog.qq.com/perfdogservice
 - 确保系统中下载了adb工具
 - Android真机开启开发者模式、打开USB调试、打开USB调试(安全设置)，以允许模拟点击
+
+<br>
 
 ## 三、环境配置
 
@@ -28,6 +32,8 @@ pip install grpcio protobuf
 SERVICE_TOKEN = ''
 SERVICE_PATH = '/Users/junjiecui/workspace/Tencent/PerfDogService(v12.1.260541-Mac)/PerfDogService'
 ```
+
+<br>
 
 ## 三、Get Start
 
@@ -73,11 +79,15 @@ tap 180 2519
 
 等待完成，可以在PerfDog云端中查看个人的性能报告，示例为：https://perfdog.qq.com/case_detail/12014574
 
+<br>
+
 ## 四、不足、后续规划
 
 - [ ] PipeLine的监控数据需要根据具体情况，支持动态调整
 - [ ] 由Android平台拓展到其他平台
 - [ ] 收集反馈意见
+
+<br>
 
 ## 五、其他文档
 
