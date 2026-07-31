@@ -1,168 +1,262 @@
 # coding: utf-8
+"""PerfDog 采集 + UI 回放 联动入口。
 
+执行时序（采集时长由回放真实结束时间决定，不再靠 time.sleep 猜）：
+    1. 启动 PerfDog 采集，等待首帧性能数据到达
+    2. 调用 ./replay.sh run <case> <loop>，阻塞直到回放进程退出
+    3. test.stop() -> test.save_data()
+
+用法:
+    python test.py --case wechat_enter_live --loop 3
+    python test.py -d 680533f -p com.tencent.mm -c cases/x.actions -n 5 --speed 2
+    python test.py --duration 30                      # 不接回放，纯定时采集
+    python test.py --export --export-dir ./report     # 同时导出本地文件
+"""
+
+import argparse
 import logging
+import os
+import sys
 import threading
 import time
 
+# 抑制 gRPC 在 fork 子进程（回放）时输出的告警噪声，需在导入 grpc 前设置
+os.environ.setdefault('GRPC_VERBOSITY', 'ERROR')
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import perfdog_pb2
 from perfdog import Test, TestAppBuilder
+from replay_runner import ReplayError, resolve_case, run_replay
 from test_base import create_service, get_all_types, set_floating_window
 
+DEFAULT_DEVICE = '680533f'
+DEFAULT_PACKAGE = 'com.tencent.mm'
 
-def main():
-    # Log output configuration, you can configure it yourself if you have special needs
-    # 日志输出配置，如果有特别的需要可自行配置
-    logging.basicConfig(format="%(asctime)s-%(levelname)s: %(message)s", level=logging.INFO)
+# 等待首帧性能数据的超时（秒）
+FIRST_DATA_TIMEOUT = 60
 
-    # Create service object proxy
+DEFAULT_TYPES = [
+    perfdog_pb2.FPS,
+    perfdog_pb2.FRAME_TIME,
+    perfdog_pb2.CPU_USAGE,
+    perfdog_pb2.MEMORY,
+]
+DEFAULT_DYNAMIC_TYPES = [
+    (perfdog_pb2.GPU_COUNTER, 'GPU General'),
+    (perfdog_pb2.GPU_COUNTER, 'GPU Stalls'),
+]
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description='PerfDog 采集 + replay.sh 回放联动',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument('-d', '--device', default=DEFAULT_DEVICE, help='设备 ID（adb devices）')
+    p.add_argument('-p', '--package', default=DEFAULT_PACKAGE, help='被测 App 包名')
+    p.add_argument('--wifi', action='store_true', help='设备通过 adb connect 连接')
+
+    p.add_argument('-c', '--case', help='动作文件，可写 cases/x.actions 或直接写用例名')
+    p.add_argument('-n', '--loop', type=int, default=1, help='回放轮次，默认 1')
+    p.add_argument('--speed', type=float, help='回放速度倍率，透传 replay.sh 的 SPEED')
+    p.add_argument('--replay-timeout', type=float, help='回放超时秒数，超时强制结束')
+    p.add_argument('--duration', type=float,
+                   help='不指定 --case 时的纯定时采集时长（秒）')
+
+    p.add_argument('--case-name', help='PerfDog 用例名，默认 <用例>_<轮次>_<时间戳>')
+    p.add_argument('--no-upload', action='store_true', help='不上传报告到云端')
+    p.add_argument('--export', action='store_true', help='导出数据到本地文件')
+    p.add_argument('--export-dir', default='', help='导出目录，配合 --export')
+    p.add_argument('--export-format', default='excel',
+                   choices=['excel', 'json', 'protobuf'], help='导出格式，默认 excel')
+
+    p.add_argument('--all-types', action='store_true', help='启用设备支持的全部性能指标')
+    p.add_argument('--quiet-perf-data', action='store_true', help='不逐条打印性能数据')
+    return p.parse_args(argv)
+
+
+EXPORT_FORMATS = {
+    'excel': perfdog_pb2.EXPORT_TO_EXCEL,
+    'json': perfdog_pb2.EXPORT_TO_JSON,
+    'protobuf': perfdog_pb2.EXPORT_TO_PROTOBUF,
+}
+
+
+def build_case_name(args):
+    if args.case_name:
+        return args.case_name
+    stem = os.path.splitext(os.path.basename(args.case))[0] if args.case else 'timed'
+    return '%s_x%d_%s' % (stem, args.loop, time.strftime('%m%d_%H%M%S'))
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    logging.basicConfig(format='%(asctime)s-%(levelname)s: %(message)s', level=logging.INFO)
+
+    # 提前校验动作文件，避免起了采集才发现路径错
+    if args.case:
+        try:
+            resolve_case(args.case)
+        except FileNotFoundError as e:
+            logging.error('%s', e)
+            return 2
+    elif args.duration is None:
+        logging.error('必须指定 --case <动作文件> 或 --duration <秒>')
+        return 2
+
+    # 既不上传又不导出时 PerfDog 的 saveData 会直接返回“无效的操作”
+    if args.no_upload and not args.export:
+        logging.error('--no-upload 需配合 --export 使用，否则数据无处落地')
+        return 2
+
     # 创建服务对象代理
     service = create_service()
 
-    # Configure whether to install floating window App, valid for Android devices
-    # If the App has been installed on the device to be tested, please uninstall it from the device manually before continuing to use it
-    # Enable one of the following two configurations according to your own testing requirements
-    # Enable installation
-    # service.enable_install_apk()
-    # Disable installation. You can set it not to install PerfDog APK to reduce unnecessary pauses and interruptions when running automation
-    # 配置是否安装浮窗App，针对安卓设备有效
-    # 如果App已经安装到要测试的设备上，请先手工从设备卸载之后继续使用
-    # 按照自己的测试要求启用下面两个配置中的一个
-    # 启用安装
-    # service.enable_install_apk()
-    # 禁止安装,可设置不安装PerfDog APK，跑自动化时减少不必要的暂停打断
+    # 禁止安装 PerfDog APK，跑自动化时减少不必要的暂停打断
     service.disable_install_apk()
 
-    # Configure log collection and reporting when exceptions occur in the tested application during runtime.
-    # Log uploading is integrated into the cloud report submission process; if no report is uploaded, logs will only be saved locally.
-    # 配置测试过程中测试应用异常时日志的采集与上报
-    # 上报日志整合在上传报告到云端时，如果没有上传报告，日志只会保存本地
+    # 测试过程中应用异常时的日志采集与上报
     service.update_configuration(enable_device_logs=True)
     service.update_configuration(enable_upload_device_logs=True)
 
-    # Uninstalling/installing the app under test; currently, only iOS devices in USB mode are supported
-    # 卸载/安装需要测试的app，目前仅支持usb模式的ios设备
-    # service.uninstall_app("00008130-001C7C61210A001C", "com.tencent.perfdog.NetworkTest")
-    # service.install_app("00008130-001C7C61210A001C", "H:\\downloads\\NetworkTest.ipa")
-
-    # TODO:
-    # Fill in the correct device ID and the package name of the test app
-    # You can use cmds.py in the same directory to obtain the list of devices connected to the computer and the App list of the corresponding devices
-    # You can fill in the type parameter according to your own needs to enable a list of performance indicator parameters. When the type value is None, use the indicator options that are enabled on the current device
-    # To enable indicators, please refer to "Indicator parameter mapping table: https://perfdog.wetest.net/article_detail?id=176&issue_id=0&plat_id=2"
-    # If you need to start collecting performance data for multiple devices in a single script process, you can run the run_test_app function multiple times in parallel through multi-threading
-    # The device connected via "adb connect" needs to use service.get_wifi_device to obtain the device
-    # 填入正确的设备ID，填入测试app的包名
-    # 可以使用同目录下cmds.py获取已连接到电脑的设备列表及相应设备的App列表
-    # 可以根据自己需要填写types参数，来启用的性能指标参数列表，types值为None时，使用当前设备已经开启的指标选项
-    # 指标启用可以参考"指标参数映射表：https://perfdog.qq.com/article_detail?id=10210&issue_id=0&plat_id=2"
-    # 如果单一脚本进程中需要启动针对多个设备性能数据收集，可以通过多线程的方式，并行运行多次run_test_app函数
-    # 通过adb connect连接的设备需要使用service.get_wifi_device获取设备
-
-    device = service.get_usb_device('680533f')
+    # 通过 adb connect 连接的设备需要用 get_wifi_device
+    device = service.get_wifi_device(args.device) if args.wifi \
+        else service.get_usb_device(args.device)
     if device is None:
-        logging.error("device not found")
-        return
+        logging.error('device not found: %s', args.device)
+        return 1
 
-    run_test_app(device,
-                 package_name='com.tencent.mm',
-                 types=[perfdog_pb2.FPS, perfdog_pb2.FRAME_TIME, perfdog_pb2.CPU_USAGE, perfdog_pb2.MEMORY],
-                 dynamic_types=[
-                     (perfdog_pb2.GPU_COUNTER, 'GPU General'),
-                     (perfdog_pb2.GPU_COUNTER, 'GPU Stalls'),
-                 ],
-                 )
+    return run_test_app(device, args)
 
 
-def run_test_app(device, package_name, types=None, dynamic_types=None, enable_all_types=False):
-    # Create test object
+def run_test_app(device, args):
     # 创建测试对象
     test = Test(device)
 
-    # Set the memory indicator sampling frequency in seconds, valid for Android devices
-    # Generally no setting is required, just use the default value
-    # 设置内存指标采样频率，单位秒，安卓设备有效
-    # 一般无需设置，使用缺省值即可
-    # device.set_memory_sampling_frequency(4)
+    # 首帧性能数据信号，用于确保回放开始前采集已真正就绪
+    first_data = threading.Event()
+    test.set_first_perf_data_callback(lambda: first_data.set())
 
-    # Set up performance data callback
-    # 设置有性能数据回调
-    evt = threading.Event()
-    test.set_first_perf_data_callback(lambda: evt.set())
+    if not args.quiet_perf_data:
+        test.set_perf_data_callback(lambda perf_data: logging.info(perf_data))
 
-    # Output performance data, it is recommended to enable it during debugging
-    # 输出性能数据，调试过程中建议开启
-    test.set_perf_data_callback(lambda perf_data: logging.info(perf_data))
+    # 输出测试过程中告警和错误信息，出问题便于查日志
+    test.set_error_perf_data_callback(
+        lambda perf_data: logging.error('PerfDog: %s', perf_data.errorData.msg))
+    test.set_warning_perf_data_callback(
+        lambda perf_data: logging.warning('PerfDog: %s', perf_data.warningData.msg))
 
-    # Output the alarm and error information during the test. It is recommended to keep it. It is easy to check the log if there is a problem
-    # 输出测试过程中告警和错误信息，建议保留，出问题便于查日志
-    test.set_error_perf_data_callback(lambda perf_data: logging.info("PerfDog: %s", perf_data.errorData.msg))
-    test.set_warning_perf_data_callback(lambda perf_data: logging.warning("PerfDog: %s", perf_data.warningData.msg))
-
-    # Automate general configuration to hide floating windows
     # 自动化一般配置隐藏浮窗
     set_floating_window(device)
 
-    # Create the target App to be tested
-    # 创建要测试目标App
+    # 创建要测试的目标 App
     builder = test.create_test_target_builder(TestAppBuilder)
-    builder.set_package_name(package_name)
+    builder.set_package_name(args.package)
     test.set_test_target(builder.build())
 
-    # Enable and disable related performance indicator types
-    # 启用和禁用相关性能指标类型
-    if enable_all_types:
+    # 启用/禁用性能指标
+    if args.all_types:
         types, dynamic_types = get_all_types(device)
-
-    if types is not None:
+    else:
+        types, dynamic_types = DEFAULT_TYPES, DEFAULT_DYNAMIC_TYPES
+    if types:
         test.set_types(*types)
-
-    if dynamic_types is not None:
+    if dynamic_types:
         test.set_dynamic_types(*dynamic_types)
 
-    # If enable_all_types is set to true, the APP_STARTUP_TIME data item will be included
-    # If APP_STARTUP_TIME is enabled, the app will be restarted for each test
-    # If you need to measure this performance, remove this method
-    # enable_all_types设置为true情况下，会包含APP_STARTUP_TIME数据项
-    # 启用该数据项的话 ，每次测试会重启app
-    # 如果需要测量该数据项，去掉该方法
+    # 启用 APP_STARTUP_TIME 会导致每次测试重启 app；SYSTEM_LOG 会收集大量系统日志
     test.disable_type(perfdog_pb2.APP_STARTUP_TIME)
-
-    # If enable_all_types is set to true, the APP_STARTUP_TIME data item will be included
-    # If SYSTEM_LOG is enabled, a large amount of system logs will be collected
-    # If you need to measure this performance, remove this method
-    # enable_all_types设置为true情况下，会包含SYSTEM_LOG数据项
-    # 启动该数据项的话，会收集大量系统日志
-    # 如果需要测量该数据项，去掉该方法
     test.disable_type(perfdog_pb2.SYSTEM_LOG)
 
+    workload_error = None
+    started_at = None
+
     try:
-        # Start performance data collection
-        # 启动性能数据采集
+        # ---------- 1. 先启动采集 ----------
+        logging.info('PerfDog: 启动采集 device=%s package=%s', args.device, args.package)
         test.start()
 
-        # Wait for performance data
-        # Need to use set_first_perf_data_callback to enable
-        # 等待有性能数据
-        # 需要使用set_first_perf_data_callback来启用
-        evt.wait()
+        if not first_data.wait(FIRST_DATA_TIMEOUT):
+            logging.warning('PerfDog: %ss 内未收到性能数据，仍继续执行回放',
+                            FIRST_DATA_TIMEOUT)
+        started_at = time.time()
+        logging.info('PerfDog: 采集就绪')
 
-        # TODO:
-        # It is recommended to add automated test processing logic here
-        # 建议在此处添加自动化测试处理逻辑
-        time.sleep(10)
-        test.set_label('label_x')
-        time.sleep(2)
-        test.add_note('n1', 12 * 1000)
-        time.sleep(2)
+        # ---------- 2. 执行 workload，阻塞直到真正结束 ----------
+        try:
+            if args.case:
+                _run_replay_workload(test, args, started_at)
+            else:
+                logging.info('定时采集 %.1fs', args.duration)
+                test.set_label('timed_begin')
+                time.sleep(args.duration)
+        except (ReplayError, KeyboardInterrupt) as e:
+            # 回放失败也要把已采集的数据落地，避免白跑
+            workload_error = e
+            logging.error('workload 中断: %s', e)
+
+        # ---------- 3. 回放结束后停止并保存 ----------
+        elapsed = time.time() - started_at
+        test.add_note('replay_end', int(elapsed * 1000))
         test.stop()
-        test.save_data()
+        logging.info('PerfDog: 采集停止，实际采集 %.1fs', elapsed)
+
+        case_name = build_case_name(args)
+        export_dir = os.path.abspath(args.export_dir) if args.export_dir else ''
+        if args.export and export_dir:
+            os.makedirs(export_dir, exist_ok=True)
+
+        try:
+            result = test.save_data(
+                case_name=case_name,
+                is_upload=not args.no_upload,
+                is_export=args.export,
+                export_format=EXPORT_FORMATS[args.export_format],
+                export_directory=export_dir,
+                extra_info={
+                    'case': os.path.basename(args.case) if args.case else 'timed',
+                    'loop': str(args.loop),
+                    'speed': str(args.speed or 1),
+                    'duration_s': '%.1f' % elapsed,
+                },
+            )
+            logging.info('PerfDog: 数据已保存 case_name=%s', case_name)
+            if result is not None:
+                logging.info('PerfDog: save_data 返回\n%s', result)
+        except Exception as e:
+            logging.error('PerfDog: save_data 失败: %s', e)
+            return 1
 
     finally:
-        # Release necessary resources
         # 必要的资源释放
         if test.is_start():
             test.stop()
 
+    return 1 if workload_error else 0
+
+
+def _run_replay_workload(test, args, started_at):
+    """把回放进度打成 PerfDog label / note，回放结束才返回"""
+
+    def on_round(n, total):
+        test.set_label('round_%d_%d' % (n, total))
+        logging.info('PerfDog: 打标 round_%d/%d', n, total)
+
+    test.set_label('replay_begin')
+    test.add_note('replay_begin', int((time.time() - started_at) * 1000))
+
+    run_replay(
+        args.case,
+        loop=args.loop,
+        speed=args.speed,
+        serial=args.device,
+        on_round=on_round,
+        timeout=args.replay_timeout,
+    )
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

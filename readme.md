@@ -49,7 +49,12 @@ android_perf_tool/
 ├── record.sh              录制：真实手势 → .actions 动作脚本
 ├── replay.sh              回放：执行 .actions
 ├── demo.sh                操作 demo：各类 input 事件示例与性能场景
-├── perfdog_demo.sh        （预留）PerfDog 性能采集联动
+├── pipeline.sh            PerfDog 采集 + 回放 一键联动入口
+├── cases/                 录制产出的动作用例
+├── report/                PerfDog 导出的报表
+├── perfdog/               PerfDog Service 自动化（详见 perfdog/readme.md）
+│   ├── test.py            入口：采集配置 + 时序编排 + save_data
+│   └── replay_runner.py   驱动 replay.sh，轮次回调与超时看门狗
 └── lib/
     ├── common.sh          公共库：adb 封装 / input 原子操作 / 控件定位
     └── parse_events.py    getevent 日志解析器
@@ -278,8 +283,17 @@ adb shell input text "hello%sworld"                 # 空格用 %s
 ```bash
 ./record.sh start feed.actions       # 录一遍进入 Feed 并滑动的操作
 vi feed.actions                      # 把 swipe 时长统一改成 1500，去掉多余 sleep
-./replay.sh run feed.actions 20      # 回放 20 轮，同时用 PerfDog / dumpsys gfxinfo 采集
+./replay.sh run feed.actions 20      # 回放 20 轮
 ```
+
+配合 PerfDog 自动采集（采集时长由回放真实结束控制）：
+
+```bash
+./pipeline.sh feed 20 --export --export-dir ./report
+```
+
+`pipeline.sh` 的时序是：启动采集 → 等首帧数据 → 回放（阻塞至结束，每轮打 `round_N_M` 标签）→ `stop` + `save_data`。
+参数详见 [`perfdog/readme.md`](perfdog/readme.md)。
 
 ### 场景 2：冷启动耗时
 

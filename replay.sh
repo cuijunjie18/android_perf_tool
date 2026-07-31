@@ -79,7 +79,8 @@ run() {
   echo "----------------------------------------------------"
   local n
   for n in $(seq 1 "$loop"); do
-    [ "$loop" -gt 1 ] && echo "===== 第 $n/$loop 轮 ====="
+    # 始终打印轮次头，便于外部工具（如 PerfDog 联动）按轮打标
+    echo "===== 第 $n/$loop 轮 ====="
     _exec_actions "$file"
   done
 }
