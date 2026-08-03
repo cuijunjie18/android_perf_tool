@@ -84,7 +84,15 @@ tap 180 2519
 ./pipeline.sh wechat_enter_live
 ```
 
-等待完成，可以在PerfDog云端中查看个人的性能报告，示例为：https://perfdog.qq.com/case_detail/12014574
+跑完会在末尾直接输出报告地址：
+```txt
+============================================================
+用例名   : wechat_enter_live_x1_0803_095849
+性能报告 : https://perfdog.qq.com/case_detail/12035743
+============================================================
+```
+
+CI 场景可用 `--url-file out.txt` 把 URL 单独写入文件。
 
 <br>
 

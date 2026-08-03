@@ -38,6 +38,9 @@ from test_base import (create_service, get_all_types, resolve_device_id,
 # 等待首帧性能数据的超时（秒）
 FIRST_DATA_TIMEOUT = 60
 
+# 云端报告地址前缀，可用 PERFDOG_WEB_BASE 覆盖（私有化部署场景）
+CASE_URL_BASE = config.get('PERFDOG_WEB_BASE', default='https://perfdog.qq.com')
+
 DEFAULT_TYPES = [
     perfdog_pb2.FPS,
     perfdog_pb2.FRAME_TIME,
@@ -75,6 +78,7 @@ def parse_args(argv=None):
     p.add_argument('--export-dir', default='', help='导出目录，配合 --export')
     p.add_argument('--export-format', default='excel',
                    choices=['excel', 'json', 'protobuf'], help='导出格式，默认 excel')
+    p.add_argument('--url-file', help='把报告 URL 写入指定文件，便于 CI 取用')
 
     p.add_argument('--all-types', action='store_true', help='启用设备支持的全部性能指标')
     p.add_argument('--quiet-perf-data', action='store_true', help='不逐条打印性能数据')
@@ -93,6 +97,52 @@ def build_case_name(args):
         return args.case_name
     stem = os.path.splitext(os.path.basename(args.case))[0] if args.case else 'timed'
     return '%s_x%d_%s' % (stem, args.loop, time.strftime('%m%d_%H%M%S'))
+
+
+def case_url(case_id):
+    """PerfDog 云端报告地址，如 https://perfdog.qq.com/case_detail/12035656"""
+    return '%s/case_detail/%s' % (CASE_URL_BASE.rstrip('/'), case_id)
+
+
+def report_summary(result, case_name):
+    """把 save_data 的结果整理成结论行：云端报告 URL / 本地文件路径"""
+    if result is None:
+        logging.warning('PerfDog: save_data 未返回结果')
+        return None
+
+    logging.debug('PerfDog: save_data 返回\n%s', result)
+
+    url = None
+    upload = getattr(result, 'uploadResult', None)
+    if upload is not None:
+        if upload.success and upload.caseId:
+            url = case_url(upload.caseId)
+        elif upload.caseId or upload.success:
+            # 有 caseId 但 success=False，属于上传中途失败
+            logging.error('PerfDog: 上传失败 caseId=%s', upload.caseId or '(空)')
+
+    local = None
+    export = getattr(result, 'exportResult', None)
+    if export is not None and getattr(export, 'filePath', ''):
+        if export.success:
+            local = export.filePath
+        else:
+            logging.error('PerfDog: 导出失败 %s', export.filePath)
+
+    # 结论单独打印到 stdout，方便 CI 直接抓取
+    print('')
+    print('=' * 60)
+    print('用例名   : %s' % case_name)
+    if url:
+        print('性能报告 : %s' % url)
+    if local:
+        print('本地文件 : %s' % local)
+    if not url and not local:
+        print('未产出报告，请检查是否同时禁用了上传与导出')
+    print('=' * 60)
+    sys.stdout.flush()
+
+    return url
 
 
 def main(argv=None):
@@ -238,8 +288,11 @@ def run_test_app(device, args):
                 },
             )
             logging.info('PerfDog: 数据已保存 case_name=%s', case_name)
-            if result is not None:
-                logging.info('PerfDog: save_data 返回\n%s', result)
+            url = report_summary(result, case_name)
+            if url and args.url_file:
+                with open(args.url_file, 'w', encoding='utf-8') as f:
+                    f.write(url + '\n')
+                logging.info('PerfDog: 报告地址已写入 %s', args.url_file)
         except Exception as e:
             logging.error('PerfDog: save_data 失败: %s', e)
             return 1

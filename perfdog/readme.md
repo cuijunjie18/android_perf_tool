@@ -77,10 +77,26 @@ add_note('replay_end') → test.stop() → test.save_data()
 | `--case-name` | PerfDog 用例名，默认 `<用例>_x<轮次>_<时间戳>` |
 | `--no-upload` | 不上传云端，**必须配合 `--export`** |
 | `--export` / `--export-dir` / `--export-format` | 导出本地文件，格式 `excel`(默认)/`json`/`protobuf` |
+| `--url-file` | 把报告 URL 写入指定文件，便于 CI 取用 |
 | `--all-types` | 启用设备支持的全部指标 |
 | `--quiet-perf-data` | 不逐条打印性能数据 |
 
 `pipeline.sh` 另支持环境变量 `PD_DEVICE` / `PD_PACKAGE` / `PYTHON`。
+
+## 输出结果
+
+跑完在末尾打印结论块（走 stdout，便于 CI 抓取）：
+
+```
+============================================================
+用例名   : wechat_enter_live_x1_0803_095849
+性能报告 : https://perfdog.qq.com/case_detail/12035743
+============================================================
+```
+
+URL 由 `save_data` 返回的 `uploadResult.caseId` 拼成，加 `--export` 时会同时打印 `本地文件` 行。
+CI 里可用 `--url-file out.txt` 把 URL 单独落盘。
+私有化部署可用环境变量 `PERFDOG_WEB_BASE` 覆盖域名（默认 `https://perfdog.qq.com`）。
 
 ## 标签与元信息
 
