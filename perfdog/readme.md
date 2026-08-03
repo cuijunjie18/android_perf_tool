@@ -11,12 +11,24 @@ pip install --upgrade pip
 pip install grpcio protobuf
 ```
 
-`config.py` 需配置：
+`config.py` 不再存放任何密钥，改为从 **环境变量 > `local_env/.env`** 加载：
 
-```python
+```bash
+cp local_env/.env.example local_env/.env
+```
+
+```txt
 SERVICE_TOKEN = '<申请到的 token>'
 SERVICE_PATH  = '<PerfDogService 可执行文件路径>'
+PD_PACKAGE    = '<被测 App 包名>'
+PD_DEVICE     = ''            # 留空则自动探测唯一在线设备
 ```
+
+`local_env/` 已被 `.gitignore` 忽略（仅保留 `.env.example`），不会把 token 提交进仓库。
+环境变量 `PERFDOG_TOKEN` / `PERFDOG_SERVICE_PATH` / `PD_PACKAGE` / `PD_DEVICE` 优先级更高；
+`PERFDOG_ENV_FILE` 可指定其它配置文件路径。
+
+配置在连接 PerfDog **之前**校验：token 缺失、路径不存在或无可执行权限都会直接报错退出。
 
 ## 执行时序
 
@@ -54,8 +66,8 @@ add_note('replay_end') → test.stop() → test.save_data()
 
 | 参数 | 说明 |
 | --- | --- |
-| `-d, --device` | 设备 ID，默认 `680533f` |
-| `-p, --package` | 被测包名，默认 `com.tencent.mm` |
+| `-d, --device` | 设备 ID。缺省读 `PD_DEVICE`，再缺省自动探测唯一在线设备；多设备时必须指定 |
+| `-p, --package` | 被测包名。缺省读 `PD_PACKAGE`，两者都无则报错退出 |
 | `--wifi` | 设备通过 `adb connect` 连接 |
 | `-c, --case` | 动作文件，可写用例名 / `cases/x.actions` / 绝对路径 |
 | `-n, --loop` | 回放轮次，默认 1 |
@@ -83,8 +95,8 @@ add_note('replay_end') → test.stop() → test.save_data()
 | --- | --- |
 | `test.py` | 入口：参数解析、采集配置、时序编排、`save_data` |
 | `replay_runner.py` | 驱动 `replay.sh`，流式解析输出、轮次回调、超时看门狗 |
-| `test_base.py` | Service 创建、指标枚举、浮窗设置 |
-| `config.py` | token 与 PerfDogService 路径 |
+| `test_base.py` | Service 创建、设备/包名解析、指标枚举、浮窗设置 |
+| `config.py` | 配置加载器（不含密钥），读环境变量与 `local_env/.env` |
 | `perfdog.py` / `perfdog_pb2*.py` | 官方 SDK 封装与 gRPC 桩代码 |
 
 ## 实测结果
@@ -102,6 +114,10 @@ add_note('replay_end') → test.stop() → test.save_data()
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| `缺少配置 SERVICE_TOKEN` | 未创建 `local_env/.env`，执行 `cp local_env/.env.example local_env/.env` 后填值 |
+| `SERVICE_PATH 指向的文件不存在` | PerfDogService 路径错误或版本升级后目录名变了 |
+| `未指定被测 App 包名` | 传 `-p`，或在 `local_env/.env` 配 `PD_PACKAGE`；用 `python perfdog/cmds.py getapps <设备ID>` 查包名 |
+| `检测到多台设备` | 用 `-d` 指定，或配 `PD_DEVICE` |
 | `save_data` 报 `无效的操作` | 既不上传也不导出。`--no-upload` 必须配合 `--export` |
 | `device not found` | 设备 ID 写错，或 `adb connect` 的设备未加 `--wifi` |
 | 60s 未收到性能数据 | App 未在前台 / 包名错误。脚本会告警但仍继续回放 |

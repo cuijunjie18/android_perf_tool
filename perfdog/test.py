@@ -8,9 +8,11 @@
 
 用法:
     python test.py --case wechat_enter_live --loop 3
-    python test.py -d 680533f -p com.tencent.mm -c cases/x.actions -n 5 --speed 2
+    python test.py -d <设备ID> -p <包名> -c cases/x.actions -n 5 --speed 2
     python test.py --duration 30                      # 不接回放，纯定时采集
     python test.py --export --export-dir ./report     # 同时导出本地文件
+
+设备与包名的取值优先级：命令行 > local_env/.env > 唯一在线设备（仅设备）
 """
 
 import argparse
@@ -26,12 +28,12 @@ os.environ.setdefault('GRPC_VERBOSITY', 'ERROR')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import perfdog_pb2
+
+import config
 from perfdog import Test, TestAppBuilder
 from replay_runner import ReplayError, resolve_case, run_replay
-from test_base import create_service, get_all_types, set_floating_window
-
-DEFAULT_DEVICE = '680533f'
-DEFAULT_PACKAGE = 'com.tencent.mm'
+from test_base import (create_service, get_all_types, resolve_device_id,
+                       resolve_package, set_floating_window)
 
 # 等待首帧性能数据的超时（秒）
 FIRST_DATA_TIMEOUT = 60
@@ -54,8 +56,10 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument('-d', '--device', default=DEFAULT_DEVICE, help='设备 ID（adb devices）')
-    p.add_argument('-p', '--package', default=DEFAULT_PACKAGE, help='被测 App 包名')
+    p.add_argument('-d', '--device',
+                   help='设备 ID，缺省读 local_env/.env 的 PD_DEVICE，再缺省自动探测唯一在线设备')
+    p.add_argument('-p', '--package',
+                   help='被测 App 包名，缺省读 local_env/.env 的 PD_PACKAGE')
     p.add_argument('--wifi', action='store_true', help='设备通过 adb connect 连接')
 
     p.add_argument('-c', '--case', help='动作文件，可写 cases/x.actions 或直接写用例名')
@@ -110,6 +114,16 @@ def main(argv=None):
     # 既不上传又不导出时 PerfDog 的 saveData 会直接返回“无效的操作”
     if args.no_upload and not args.export:
         logging.error('--no-upload 需配合 --export 使用，否则数据无处落地')
+        return 2
+
+    # 解析设备与包名：命令行 > local_env/.env > 唯一在线设备（仅设备）
+    # 同时校验 token / SERVICE_PATH，全部在启动 PerfDog 之前完成
+    try:
+        config.ensure_configured()
+        args.device = resolve_device_id(args.device)
+        args.package = resolve_package(args.package)
+    except config.ConfigError as e:
+        logging.error('%s', e)
         return 2
 
     # 创建服务对象代理

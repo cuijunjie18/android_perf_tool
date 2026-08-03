@@ -3,7 +3,8 @@
 import sys
 
 import perfdog_pb2
-from config import SERVICE_TOKEN, SERVICE_PATH
+
+import config
 from perfdog import Service
 
 
@@ -122,11 +123,18 @@ def main():
     func, args = get_func_and_args(sys.argv[1:])
     if func is None:
         print_usage()
-        return
+        return 0
 
-    service = Service(SERVICE_TOKEN, SERVICE_PATH)
+    try:
+        config.ensure_configured()
+    except config.ConfigError as e:
+        print('ERROR: %s' % e, file=sys.stderr)
+        return 2
+
+    service = Service(config.SERVICE_TOKEN, config.SERVICE_PATH)
     func(service, *args)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

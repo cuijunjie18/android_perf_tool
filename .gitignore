@@ -1,4 +1,10 @@
 cases/
 .venv/
 report/
-local_env/
+
+# 本机配置含 token，不入库；仅保留模板
+local_env/*
+!local_env/.env.example
+
+__pycache__/
+*.pyc

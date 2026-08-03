@@ -27,10 +27,17 @@ pip install grpcio protobuf
 ```
 
 - PerfDog Service config配置
-编辑perfdog/config.py，如下所示，路径根据实际情况修改，token填自己的
+
+配置不写在代码里。复制模板后填入自己的 token 与路径：
+```shell
+cp local_env/.env.example local_env/.env
+```
+编辑 `local_env/.env`（该目录已被 .gitignore 忽略，不会入库）：
 ```txt
-SERVICE_TOKEN = ''
-SERVICE_PATH = '/Users/junjiecui/workspace/Tencent/PerfDogService(v12.1.260541-Mac)/PerfDogService'
+SERVICE_TOKEN = '<PerfDog 申请到的 token>'
+SERVICE_PATH  = '<PerfDogService 可执行文件路径>'
+PD_PACKAGE    = '<被测 App 包名>'
+PD_DEVICE     = ''            # 留空则自动探测唯一在线设备
 ```
 
 <br>
